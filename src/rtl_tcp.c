@@ -82,22 +82,27 @@ static int enable_biastee = 0;
 static int global_numq = 0;
 static struct llist *ll_buffers = 0;
 static int llbuf_num = 500;
+static int ignore_f_command = 0;
+static int ignore_s_command = 0;
+static int verbosity = 0;
 
 static volatile int do_exit = 0;
 
 void usage(void)
 {
-	printf("rtl_tcp, an I/Q spectrum server for RTL2832 based DVB-T receivers\n\n"
-		"Usage:\t[-a listen address]\n"
+	printf("rtl_tcp, an I/Q spectrum server for RTL2832 based DVB-T receivers - modified by Bas ON5HB for websdr.org\n\n"
+		"Usage:\n"
+		"\t[-a listen address]\n"
 		"\t[-p listen port (default: 1234)]\n"
-		"\t[-f frequency to tune to [Hz]]\n"
+		"\t[-f frequency to tune to [Hz] - If freq set centerfreq and progfreq is ignored!!]\n"
+		"\t[-s samplerate in [Hz] - If sample rate is set it will be ignored from client!!]\n"
 		"\t[-g gain (default: 0 for auto)]\n"
-		"\t[-s samplerate in Hz (default: 2048000 Hz)]\n"
 		"\t[-b number of buffers (default: 15, set by library)]\n"
 		"\t[-n max number of linked list buffers to keep (default: 500)]\n"
 		"\t[-d device index (default: 0)]\n"
 		"\t[-P ppm_error (default: 0)]\n"
-		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n");
+		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n"
+		"\t[-v increase verbosity also show valid gain levels (default: 0)]\n");
 	exit(1);
 }
 
@@ -258,7 +263,8 @@ static int set_gain_by_index(rtlsdr_dev_t *_dev, unsigned int index)
 		count = rtlsdr_get_tuner_gains(_dev, gains);
 
 		res = rtlsdr_set_tuner_gain(_dev, gains[index]);
-
+		if (verbosity)
+                        fprintf(stderr, "set tuner gain to %.1f dB\n", gains[index] / 10.0);
 		free(gains);
 	}
 
@@ -304,14 +310,26 @@ static void *command_worker(void *arg)
 			}
 		}
 		switch(cmd.cmd) {
-		case 0x01:
-			printf("set freq %d\n", ntohl(cmd.param));
-			rtlsdr_set_center_freq(dev,ntohl(cmd.param));
-			break;
-		case 0x02:
-			printf("set sample rate %d\n", ntohl(cmd.param));
-			rtlsdr_set_sample_rate(dev, ntohl(cmd.param));
-			break;
+                case 0x01:
+                        if (ignore_f_command)
+                                {
+                                        printf("set freq %d ignored because -f used at commandline\n", ntohl(cmd.param));
+                                }
+                        else {
+                                        printf("set freq %d\n", ntohl(cmd.param));
+                                        rtlsdr_set_center_freq(dev ,ntohl(cmd.param));
+                        }
+                        break;
+                case 0x02:
+                        if (ignore_s_command)
+                                {
+                                        printf("set sample rate %d ignored because -s used at commandline\n", ntohl(cmd.param));
+                                }
+                        else    {
+                                        printf("set sample rate %d\n", ntohl(cmd.param));
+                                        rtlsdr_set_sample_rate(dev ,ntohl(cmd.param));
+                        }
+                        break;
 		case 0x03:
 			printf("set gain mode %d\n", ntohl(cmd.param));
 			rtlsdr_set_tuner_gain_mode(dev, ntohl(cmd.param));
@@ -390,6 +408,7 @@ int main(int argc, char **argv)
 	fd_set readfds;
 	u_long blockmode = 1;
 	dongle_info_t dongle_info;
+	int gains[100];
 #ifdef _WIN32
 	WSADATA wsd;
 	i = WSAStartup(MAKEWORD(2,2), &wsd);
@@ -397,21 +416,23 @@ int main(int argc, char **argv)
 	struct sigaction sigact, sigign;
 #endif
 
-	while ((opt = getopt(argc, argv, "a:p:f:g:s:b:n:d:P:T")) != -1) {
+	while ((opt = getopt(argc, argv, "a:p:f:g:s:b:n:d:P:T:v")) != -1) {
 		switch (opt) {
 		case 'd':
 			dev_index = verbose_device_search(optarg);
 			dev_given = 1;
 			break;
-		case 'f':
-			frequency = (uint32_t)atofs(optarg);
-			break;
+                case 'f':
+                        frequency = (uint32_t)atofs(optarg);
+                        ignore_f_command = 1;
+                        break;
 		case 'g':
 			gain = (int)(atof(optarg) * 10); /* tenths of a dB */
 			break;
-		case 's':
-			samp_rate = (uint32_t)atofs(optarg);
-			break;
+                case 's':
+                        samp_rate = (uint32_t)atofs(optarg);
+                        ignore_s_command = 1;
+                        break;
 		case 'a':
 			addr = optarg;
 			break;
@@ -430,6 +451,9 @@ int main(int argc, char **argv)
 		case 'T':
 			enable_biastee = 1;
 			break;
+                case 'v':
+                        verbosity++;
+                        break;
 		default:
 			usage();
 			break;
@@ -438,6 +462,9 @@ int main(int argc, char **argv)
 
 	if (argc < optind)
 		usage();
+
+        if (verbosity >= 1)
+                fprintf(stderr, "verbosity set to %d\n", verbosity);
 
 	if (!dev_given) {
 		dev_index = verbose_device_search("0");
@@ -535,10 +562,8 @@ int main(int argc, char **argv)
 
 	while(1) {
 		printf("listening...\n");
-		printf("Use the device argument 'rtl_tcp=%s:%d' in OsmoSDR "
-		       "(gr-osmosdr) source\n"
-		       "to receive samples in GRC and control "
-		       "rtl_tcp parameters (frequency, gain, ...).\n",
+		printf("Use the device argument '!rtlsdr %s:%d' in websdr.cfg\n"
+		       "Do not set progfreq but use -f instead for converted centerfreq\n",
 		       addr, port);
 		listen(listensocket,1);
 
@@ -571,6 +596,15 @@ int main(int argc, char **argv)
 		r = rtlsdr_get_tuner_gains(dev, NULL);
 		if (r >= 0)
 			dongle_info.tuner_gain_count = htonl(r);
+
+		if (verbosity >= 0)
+                {
+                        fprintf(stderr, "Supported gain values (%d): ", r);
+                        for (i = 0; i < r; i++)
+                                fprintf(stderr, "%.1f ", gains[i] / 10.0);
+                        fprintf(stderr, "\n");
+                }
+
 
 		r = send(s, (const char *)&dongle_info, sizeof(dongle_info), 0);
 		if (sizeof(dongle_info) != r)
